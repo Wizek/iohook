@@ -3,12 +3,14 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const get = require('simple-get');
+const nugget = require('nugget');
+const rc = require('rc');
 const pump = require('pump');
 const tfs = require('tar-fs');
 const zlib = require('zlib');
 const pkg = require('./package.json');
 const supportedTargets = require('./package.json').supportedTargets;
+const { optionsFromPackage } = require('./helpers');
 
 function onerror(err) {
   throw err;
@@ -28,83 +30,69 @@ function install(runtime, abi, platform, arch, cb) {
   const currentPlatform = pkg.name + '-v' + pkgVersion + '-' + essential;
 
   console.log('Downloading prebuild for platform:', currentPlatform);
-  let downloadUrl = 'https://github.com/WilixLead/iohook/releases/download/v' + pkgVersion + '/' + currentPlatform + '.tar.gz';
+  let downloadUrl = 'https://github.com/wilix-team/iohook/releases/download/v' + pkgVersion + '/' + currentPlatform + '.tar.gz';
 
-  let reqOpts = {url: downloadUrl};
-  let tempFile = path.join(os.tmpdir(), 'prebuild.tar.gz');
-  let req = get(reqOpts, function(err, res) {
-    if (err) {
-      return onerror(err);
-    }
-    if (res.statusCode !== 200) {
-      if (res.statusCode === 404) {
+  let nuggetOpts = {
+    dir: os.tmpdir(),
+    target: 'prebuild.tar.gz',
+    strictSSL: true
+  };
+
+  let npmrc = {};
+
+  try {
+    rc('npm', npmrc);
+  } catch (error) {
+    console.warn('Error reading npm configuration: ' + error.message);
+  }
+
+  if (npmrc && npmrc.proxy) {
+    nuggetOpts.proxy = npmrc.proxy;
+  }
+
+  if (npmrc && npmrc['https-proxy']) {
+    nuggetOpts.proxy = npmrc['https-proxy'];
+  }
+
+  if (npmrc && npmrc['strict-ssl'] === false) {
+    nuggetOpts.strictSSL = false;
+  }
+
+  nugget(downloadUrl, nuggetOpts, function(errors) {
+    if (errors) {
+      const error = errors[0];
+
+      if (error.message.indexOf('404') === -1) {
+        onerror(error);
+      } else {
         console.error('Prebuild for current platform (' + currentPlatform + ') not found!');
         console.error('Try to compile for your platform:');
         console.error('# cd node_modules/iohook;');
-        console.error('# npm run compile');
+        console.error('# npm run build');
         console.error('');
-        return onerror('Prebuild for current platform (' + currentPlatform + ') not found!');
       }
-      return onerror('Bad response from prebuild server. Code: ' + res.statusCode);
     }
-    pump(res, fs.createWriteStream(tempFile), function(err) {
+
+    let options = {
+      readable: true,
+      writable: true,
+      hardlinkAsFilesFallback: true
+    };
+
+    let binaryName;
+    let updateName = function(entry) {
+      if (/\.node$/i.test(entry.name)) binaryName = entry.name
+    };
+    let targetFile = path.join(__dirname, 'builds', essential);
+    let extract = tfs.extract(targetFile, options)
+      .on('entry', updateName);
+    pump(fs.createReadStream(path.join(nuggetOpts.dir, nuggetOpts.target)), zlib.createGunzip(), extract, function(err) {
       if (err) {
-        throw err;
+        return onerror(err);
       }
-      let options = {
-        readable: true,
-        writable: true,
-        hardlinkAsFilesFallback: true
-      };
-      let binaryName;
-      let updateName = function(entry) {
-        if (/\.node$/i.test(entry.name)) binaryName = entry.name
-      };
-      let targetFile = path.join(__dirname, 'builds', essential);
-      let extract = tfs.extract(targetFile, options)
-        .on('entry', updateName);
-      pump(fs.createReadStream(tempFile), zlib.createGunzip(), extract, function(err) {
-        if (err) {
-          return onerror(err);
-        }
-        cb()
-      })
-    })
+      cb()
+    });
   });
-
-  req.setTimeout(30 * 1000, function() {
-    req.abort()
-  })
-}
-
-/**
- * Return options for iohook from package.json
- * @return {Object}
- */
-function optionsFromPackage(attempts) {
-  attempts = attempts || 2;
-  if (attempts > 5) {
-    console.log('Can\'t resolve main package.json file');
-    return {
-      targets: [],
-      platforms: [process.platform],
-      arches: [process.arch]
-    }
-  }
-  let mainPath = Array(attempts).join("../");
-  try {
-    const content = fs.readFileSync(path.join(__dirname, mainPath, 'package.json'), 'utf-8');
-    const packageJson = JSON.parse(content);
-    const opts = packageJson.iohook || {};
-    if (!opts.targets) {
-      opts.targets = []
-    }
-    if (!opts.platforms) opts.platforms = [process.platform];
-    if (!opts.arches) opts.arches = [process.arch];
-    return opts
-  } catch (e) {
-    return optionsFromPackage(attempts + 1);
-  }
 }
 
 const options = optionsFromPackage();
